@@ -3,20 +3,15 @@ from flask_cors import CORS
 import sqlite3
 import os
 from datetime import datetime
-import google.generativeai as genai
+import requests
+import json
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 DB = "ai_saas.db"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
-# Настройка Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash-exp")
-else:
-    model = None
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # --- База данных ---
 
@@ -86,7 +81,7 @@ def get_history(user_id):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "ai": "DeepSeek"})
 
 @app.route("/register", methods=["POST"])
 def register():
@@ -134,8 +129,8 @@ def chat():
     save_message(int(user_id), "user", message)
 
     # Если нет API-ключа — используем заглушку
-    if not GEMINI_API_KEY or not model:
-        fallback = f"Это демо-ответ. Вы написали: «{message}». Настройте GEMINI_API_KEY для реальных ответов."
+    if not DEEPSEEK_API_KEY:
+        fallback = f"Это демо-ответ от DeepSeek. Вы написали: «{message}». Настройте DEEPSEEK_API_KEY в Render для реальных ответов."
         save_message(int(user_id), "ai", fallback)
 
         def generate_fallback():
@@ -143,16 +138,38 @@ def chat():
                 yield f"data: {char}\n\n"
         return Response(generate_fallback(), mimetype="text/event-stream")
 
-    # Реальный ответ от Gemini
+    # Реальный ответ от DeepSeek
     try:
-        response = model.generate_content(message, stream=True)
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": message}],
+            "stream": True
+        }
+
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, stream=True, timeout=30)
 
         def generate():
             full_response = ""
-            for chunk in response:
-                if chunk.text:
-                    full_response += chunk.text
-                    yield f"data: {chunk.text}\n\n"
+            for line in response.iter_lines():
+                if line:
+                    line = line.decode("utf-8")
+                    if line.startswith("data: "):
+                        json_str = line[6:]
+                        if json_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk_data = json.loads(json_str)
+                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                full_response += content
+                                yield f"data: {content}\n\n"
+                        except:
+                            pass
             # Сохраняем полный ответ AI
             save_message(int(user_id), "ai", full_response)
 
