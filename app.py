@@ -17,8 +17,8 @@ def after_request(response):
     return response
 
 DB = "ai_saas.db"
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # --- База данных ---
 
@@ -88,7 +88,7 @@ def get_history(user_id):
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "ai": "DeepSeek"})
+    return jsonify({"status": "ok", "ai": "Groq (Llama 3)"})
 
 @app.route("/register", methods=["POST", "OPTIONS"])
 def register():
@@ -144,42 +144,29 @@ def chat():
     save_message(int(user_id), "user", message)
 
     # Если API-ключ не задан — возвращаем заглушку
-    if not DEEPSEEK_API_KEY:
-        fallback = f"Привет! Я демо-версия DeepSeek. Вы написали: «{message}». Чтобы я стал умнее, добавьте DEEPSEEK_API_KEY в Render."
+    if not GROQ_API_KEY:
+        fallback = f"Привет! Я демо-версия Groq (Llama 3). Вы написали: «{message}». Добавьте GROQ_API_KEY в Render."
         save_message(int(user_id), "ai", fallback)
-        return Response(
-            f"data: {fallback}\n\n",
-            mimetype="text/event-stream"
-        )
+        return Response(f"data: {fallback}\n\n", mimetype="text/event-stream")
 
-    # Реальный запрос к DeepSeek
+    # Реальный запрос к Groq
     try:
         headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "deepseek-chat",
+            "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": message}],
             "stream": True
         }
 
-        response = requests.post(
-            DEEPSEEK_API_URL,
-            headers=headers,
-            json=payload,
-            stream=True,
-            timeout=30
-        )
+        response = requests.post(GROQ_API_URL, headers=headers, json=payload, stream=True, timeout=30)
 
-        # Проверяем статус ответа
         if response.status_code != 200:
-            error_msg = f"Ошибка DeepSeek API: {response.status_code}"
+            error_msg = f"Ошибка Groq API: {response.status_code}"
             save_message(int(user_id), "ai", error_msg)
-            return Response(
-                f"data: {error_msg}\n\n",
-                mimetype="text/event-stream"
-            )
+            return Response(f"data: {error_msg}\n\n", mimetype="text/event-stream")
 
         def generate():
             full_response = ""
@@ -197,32 +184,19 @@ def chat():
                             if content:
                                 full_response += content
                                 yield f"data: {content}\n\n"
-                        except json.JSONDecodeError:
+                        except:
                             pass
-
-            # Сохраняем полный ответ AI
             if full_response:
                 save_message(int(user_id), "ai", full_response)
             else:
-                save_message(int(user_id), "ai", "DeepSeek не ответил.")
+                save_message(int(user_id), "ai", "Groq не ответил.")
 
         return Response(generate(), mimetype="text/event-stream")
-
-    except requests.exceptions.Timeout:
-        error_msg = "DeepSeek не ответил вовремя. Попробуйте позже."
-        save_message(int(user_id), "ai", error_msg)
-        return Response(
-            f"data: {error_msg}\n\n",
-            mimetype="text/event-stream"
-        )
 
     except Exception as e:
         error_msg = f"Ошибка AI: {str(e)}"
         save_message(int(user_id), "ai", error_msg)
-        return Response(
-            f"data: {error_msg}\n\n",
-            mimetype="text/event-stream"
-        )
+        return Response(f"data: {error_msg}\n\n", mimetype="text/event-stream")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
