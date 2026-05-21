@@ -142,7 +142,7 @@ def chat():
     save_message(int(user_id), "user", message)
 
     if not DEEPSEEK_API_KEY:
-        fallback = f"Это демо-ответ от DeepSeek. Вы написали: «{message}». Настройте DEEPSEEK_API_KEY в Render для реальных ответов."
+        fallback = f"Это демо-ответ. Вы написали: «{message}». Настройте DEEPSEEK_API_KEY."
         save_message(int(user_id), "ai", fallback)
         def generate_fallback():
             for char in fallback:
@@ -159,13 +159,16 @@ def chat():
             "messages": [{"role": "user", "content": message}],
             "stream": True
         }
+        print("Отправляю запрос к DeepSeek...")
         response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, stream=True, timeout=30)
+        print(f"Статус ответа: {response.status_code}")
 
         def generate():
             full_response = ""
             for line in response.iter_lines():
                 if line:
                     line = line.decode("utf-8")
+                    print(f"LINE: {line}")
                     if line.startswith("data: "):
                         json_str = line[6:]
                         if json_str.strip() == "[DONE]":
@@ -177,14 +180,15 @@ def chat():
                             if content:
                                 full_response += content
                                 yield f"data: {content}\n\n"
-                        except:
-                            pass
+                        except Exception as e:
+                            print(f"Ошибка парсинга чанка: {e}")
             save_message(int(user_id), "ai", full_response)
 
         return Response(generate(), mimetype="text/event-stream")
 
     except Exception as e:
         error_msg = f"Ошибка AI: {str(e)}"
+        print(error_msg)
         save_message(int(user_id), "ai", error_msg)
         def generate_error():
             yield f"data: {error_msg}\n\n"
