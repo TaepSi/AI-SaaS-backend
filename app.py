@@ -7,7 +7,15 @@ import requests
 import json
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# Добавляем CORS-заголовки вручную для надёжности
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
 
 DB = "ai_saas.db"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -79,12 +87,14 @@ def get_history(user_id):
 
 # --- Маршруты ---
 
-@app.route("/")
+@app.route("/", methods=["GET", "OPTIONS"])
 def home():
     return jsonify({"status": "ok", "ai": "DeepSeek"})
 
-@app.route("/register", methods=["POST"])
+@app.route("/register", methods=["POST", "OPTIONS"])
 def register():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
     data = request.get_json()
     email = data.get("email", "").strip()
     password = data.get("password", "").strip()
@@ -98,8 +108,10 @@ def register():
     user_id = create_user(email, password)
     return jsonify({"success": True, "user_id": user_id})
 
-@app.route("/login", methods=["POST"])
+@app.route("/login", methods=["POST", "OPTIONS"])
 def login():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
     data = request.get_json()
     email = data.get("email", "").strip()
     password = data.get("password", "").strip()
@@ -117,28 +129,26 @@ def history():
         return jsonify({"error": "user_id обязателен"}), 400
     return jsonify(get_history(int(user_id)))
 
-@app.route("/chat", methods=["POST"])
+@app.route("/chat", methods=["POST", "OPTIONS"])
 def chat():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
     data = request.get_json()
     user_id = data.get("user_id")
     message = data.get("message", "").strip()
     if not user_id or not message:
         return jsonify({"error": "user_id и message обязательны"}), 400
 
-    # Сохраняем сообщение пользователя
     save_message(int(user_id), "user", message)
 
-    # Если нет API-ключа — используем заглушку
     if not DEEPSEEK_API_KEY:
         fallback = f"Это демо-ответ от DeepSeek. Вы написали: «{message}». Настройте DEEPSEEK_API_KEY в Render для реальных ответов."
         save_message(int(user_id), "ai", fallback)
-
         def generate_fallback():
             for char in fallback:
                 yield f"data: {char}\n\n"
         return Response(generate_fallback(), mimetype="text/event-stream")
 
-    # Реальный ответ от DeepSeek
     try:
         headers = {
             "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -149,7 +159,6 @@ def chat():
             "messages": [{"role": "user", "content": message}],
             "stream": True
         }
-
         response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, stream=True, timeout=30)
 
         def generate():
@@ -170,7 +179,6 @@ def chat():
                                 yield f"data: {content}\n\n"
                         except:
                             pass
-            # Сохраняем полный ответ AI
             save_message(int(user_id), "ai", full_response)
 
         return Response(generate(), mimetype="text/event-stream")
@@ -178,7 +186,6 @@ def chat():
     except Exception as e:
         error_msg = f"Ошибка AI: {str(e)}"
         save_message(int(user_id), "ai", error_msg)
-
         def generate_error():
             yield f"data: {error_msg}\n\n"
         return Response(generate_error(), mimetype="text/event-stream")
