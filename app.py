@@ -274,7 +274,8 @@ def register():
     conn.commit()
     conn.close()
 
-    send_verification_email(email, code)
+    print("VERIFICATION CODE:", code)
+    # send_verification_email(email, code)
 
     return jsonify({
         "success": True
