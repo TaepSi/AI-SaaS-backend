@@ -385,100 +385,28 @@ def chat():
     data = request.get_json()
 
     user_id = data.get("user_id")
-    message = data.get("message", "").strip()
+    message = data.get("message", "")
 
     if not user_id or not message:
+        return jsonify({"error": "message required"}), 400
+
+    save_message(int(user_id), "user", message)
+
+    try:
+        fallback = f"AI ответ: {message}"
+
+        save_message(int(user_id), "ai", fallback)
+
         return jsonify({
-            "error": "message required"
-        }), 400
+            "reply": fallback
+        })
 
-    save_message(
-        int(user_id),
-        "user",
-        message
-    )
+    except Exception as e:
+        print("CHAT ERROR:", e)
 
-    if not GROQ_API_KEY:
-        fallback = f"Вы написали: {message}"
-
-        save_message(
-            int(user_id),
-            "ai",
-            fallback
-        )
-
-        return Response(
-            f"data: {fallback}\n\n",
-            mimetype="text/event-stream"
-        )
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {
-                "role": "user",
-                "content": message
-            }
-        ],
-        "stream": True
-    }
-
-    response = requests.post(
-        GROQ_API_URL,
-        headers=headers,
-        json=payload,
-        stream=True,
-        timeout=(10, 60)
-    )
-
-    def generate():
-        full_response = ""
-
-        for line in response.iter_lines():
-            if line:
-                line = line.decode("utf-8")
-
-                if line.startswith("data: "):
-                    json_str = line[6:]
-
-                    if json_str == "[DONE]":
-                        break
-
-                    try:
-                        chunk = json.loads(json_str)
-
-                        delta = chunk["choices"][0]["delta"]
-
-                        content = delta.get(
-                            "content",
-                            ""
-                        )
-
-                        if content:
-                            full_response += content
-
-                            yield f"data: {content}\n\n"
-
-                    except:
-                        pass
-
-        if full_response:
-            save_message(
-                int(user_id),
-                "ai",
-                full_response
-            )
-
-    return Response(
-        generate(),
-        mimetype="text/event-stream"
-    )
-
+        return jsonify({
+            "error": "chat failed"
+        }), 500
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
