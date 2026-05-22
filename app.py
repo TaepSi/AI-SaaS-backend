@@ -1,11 +1,14 @@
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import os
+import random
+import string
 from datetime import datetime
 import requests
 import json
 import psycopg2
-import psycopg2.extras
+import smtplib
+from email.mime.text import MIMEText
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -17,15 +20,17 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     return response
 
-# Подключение к Neon (строка из переменной окружения)
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.rambler.ru")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
-
-# --- База данных ---
 
 def init_db():
     conn = get_conn()
@@ -35,6 +40,8 @@ def init_db():
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
+            verified BOOLEAN DEFAULT FALSE,
+            verification_code TEXT,
             created_at TEXT NOT NULL
         )
     """)
@@ -63,15 +70,26 @@ def get_user_by_email(email):
     conn.close()
     return row
 
-def create_user(email, password):
+def create_user(email, password, code):
     conn = get_conn()
     cur = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    cur.execute("INSERT INTO users (email, password, created_at) VALUES (%s, %s, %s) RETURNING id", (email, password, now))
+    cur.execute("INSERT INTO users (email, password, verification_code, created_at) VALUES (%s, %s, %s, %s) RETURNING id", (email, password, code, now))
     user_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
     return user_id
+
+def verify_user(email, code):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE email = %s AND verification_code = %s AND verified = FALSE", (email, code))
+    row = cur.fetchone()
+    if row:
+        cur.execute("UPDATE users SET verified = TRUE, verification_code = NULL WHERE email = %s", (email,))
+        conn.commit()
+    conn.close()
+    return row is not None
 
 def save_message(user_id, role, content):
     conn = get_conn()
@@ -89,11 +107,22 @@ def get_history(user_id):
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
 
+def send_verification_email(to_email, code):
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        return
+    msg = MIMEText(f"Ваш код верификации: {code}\n\nЭто демо-проект портфолио. Пожалуйста, не создавайте лишние аккаунты.")
+    msg["Subject"] = "AI SaaS — Код верификации"
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = to_email
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
+
 # --- Маршруты ---
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "ai": "Groq (Llama 3)", "db": "Neon PostgreSQL"})
+    return jsonify({"status": "ok", "ai": "Groq", "db": "Neon", "smtp": "Rambler"})
 
 @app.route("/register", methods=["POST", "OPTIONS"])
 def register():
@@ -109,8 +138,23 @@ def register():
     existing = get_user_by_email(email)
     if existing:
         return jsonify({"error": "Пользователь с таким email уже существует"}), 400
-    user_id = create_user(email, password)
-    return jsonify({"success": True, "user_id": user_id})
+    code = ''.join(random.choices(string.digits, k=6))
+    create_user(email, password, code)
+    send_verification_email(email, code)
+    return jsonify({"success": True, "message": "Код отправлен на почту"})
+
+@app.route("/verify", methods=["POST", "OPTIONS"])
+def verify():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    email = data.get("email", "").strip()
+    code = data.get("code", "").strip()
+    if not email or not code:
+        return jsonify({"error": "Email и код обязательны"}), 400
+    if verify_user(email, code):
+        return jsonify({"success": True})
+    return jsonify({"error": "Неверный код"}), 400
 
 @app.route("/login", methods=["POST", "OPTIONS"])
 def login():
@@ -124,6 +168,8 @@ def login():
     user = get_user_by_email(email)
     if not user or user[2] != password:
         return jsonify({"error": "Неверный email или пароль"}), 401
+    if not user[3]:
+        return jsonify({"error": "Почта не подтверждена. Проверьте почту и введите код."}), 403
     return jsonify({"success": True, "user_id": user[0], "email": user[1]})
 
 @app.route("/history", methods=["GET"])
@@ -142,31 +188,19 @@ def chat():
     message = data.get("message", "").strip()
     if not user_id or not message:
         return jsonify({"error": "user_id и message обязательны"}), 400
-
     save_message(int(user_id), "user", message)
-
     if not GROQ_API_KEY:
-        fallback = f"Привет! Я демо-версия Groq. Вы написали: «{message}». Добавьте GROQ_API_KEY в Render."
+        fallback = f"Привет! Я демо-версия Groq. Вы написали: «{message}»."
         save_message(int(user_id), "ai", fallback)
         return Response(f"data: {fallback}\n\n", mimetype="text/event-stream")
-
     try:
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": message}],
-            "stream": True
-        }
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": message}], "stream": True}
         response = requests.post(GROQ_API_URL, headers=headers, json=payload, stream=True, timeout=30)
-
         if response.status_code != 200:
             error_msg = f"Ошибка Groq API: {response.status_code}"
             save_message(int(user_id), "ai", error_msg)
             return Response(f"data: {error_msg}\n\n", mimetype="text/event-stream")
-
         def generate():
             full_response = ""
             for line in response.iter_lines():
@@ -189,9 +223,7 @@ def chat():
                 save_message(int(user_id), "ai", full_response)
             else:
                 save_message(int(user_id), "ai", "Groq не ответил.")
-
         return Response(generate(), mimetype="text/event-stream")
-
     except Exception as e:
         error_msg = f"Ошибка AI: {str(e)}"
         save_message(int(user_id), "ai", error_msg)
