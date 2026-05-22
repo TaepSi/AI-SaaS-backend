@@ -392,21 +392,39 @@ def chat():
 
     save_message(int(user_id), "user", message)
 
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "user", "content": message}
+        ]
+    }
+
     try:
-        fallback = f"AI ответ: {message}"
+        response = requests.post(
+            GROQ_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
 
-        save_message(int(user_id), "ai", fallback)
+        data = response.json()
 
-        return jsonify({
-            "reply": fallback
-        })
+        ai_text = data["choices"][0]["message"]["content"]
 
     except Exception as e:
-        print("CHAT ERROR:", e)
+        print("AI ERROR:", e)
+        ai_text = "Ошибка AI сервера"
 
-        return jsonify({
-            "error": "chat failed"
-        }), 500
+    save_message(int(user_id), "ai", ai_text)
+
+    return jsonify({
+        "reply": ai_text
+    })
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
