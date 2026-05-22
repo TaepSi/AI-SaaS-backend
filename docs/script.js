@@ -79,7 +79,6 @@ if (loginForm) {
 
 // Регистрация
 const registerForm = document.getElementById("registerForm");
-const verifyForm = document.getElementById("verifyForm");
 let pendingEmail = "";
 
 if (registerForm) {
@@ -121,7 +120,7 @@ if (registerForm) {
             // Успешная регистрация — показываем форму верификации
             pendingEmail = email;
             registerForm.style.display = "none";
-            verifyForm.style.display = "flex";
+            document.getElementById("verifyBlock").style.display = "block";
             document.getElementById("registerSuccess").textContent = "Код отправлен на почту!";
 
         } catch (error) {
@@ -131,6 +130,7 @@ if (registerForm) {
 }
 
 // Верификация
+const verifyForm = document.getElementById("verifyForm");
 if (verifyForm) {
     verifyForm.addEventListener("submit", async (e) => {
         e.preventDefault();
