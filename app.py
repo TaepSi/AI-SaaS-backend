@@ -35,16 +35,23 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-    # Удаляем старые таблицы и создаём новые с verification_code
     cur.execute("DROP TABLE IF EXISTS messages CASCADE")
     cur.execute("DROP TABLE IF EXISTS users CASCADE")
+    cur.execute("DROP TABLE IF EXISTS pending_users CASCADE")
+    cur.execute("""
+        CREATE TABLE pending_users (
+            id SERIAL PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            verification_code TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
     cur.execute("""
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            verified BOOLEAN DEFAULT FALSE,
-            verification_code TEXT,
             created_at TEXT NOT NULL
         )
     """)
@@ -73,26 +80,44 @@ def get_user_by_email(email):
     conn.close()
     return row
 
-def create_user(email, password, code):
+def get_pending_user(email):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM pending_users WHERE email = %s", (email,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def create_pending_user(email, password, code):
     conn = get_conn()
     cur = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    cur.execute("INSERT INTO users (email, password, verification_code, created_at) VALUES (%s, %s, %s, %s) RETURNING id", (email, password, code, now))
-    user_id = cur.fetchone()[0]
+    cur.execute("INSERT INTO pending_users (email, password, verification_code, created_at) VALUES (%s, %s, %s, %s)", (email, password, code, now))
     conn.commit()
     conn.close()
-    return user_id
 
-def verify_user(email, code):
+def verify_and_create_user(email, code):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE email = %s AND verification_code = %s AND verified = FALSE", (email, code))
+    cur.execute("SELECT * FROM pending_users WHERE email = %s AND verification_code = %s", (email, code))
     row = cur.fetchone()
-    if row:
-        cur.execute("UPDATE users SET verified = TRUE, verification_code = NULL WHERE email = %s", (email,))
-        conn.commit()
+    if not row:
+        conn.close()
+        return None
+    # Переносим в основную таблицу
+    cur.execute("INSERT INTO users (email, password, created_at) VALUES (%s, %s, %s)", (row[1], row[2], row[3]))
+    user_id = cur.fetchone()[0] if hasattr(cur, 'fetchone') else None
+    # Удаляем из pending
+    cur.execute("DELETE FROM pending_users WHERE email = %s", (email,))
+    conn.commit()
     conn.close()
-    return row is not None
+    # Получаем id созданного пользователя
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+    user_id = cur.fetchone()[0]
+    conn.close()
+    return user_id
 
 def save_message(user_id, role, content):
     conn = get_conn()
@@ -111,15 +136,25 @@ def get_history(user_id):
     return [{"role": r[0], "content": r[1]} for r in rows]
 
 def send_verification_email(to_email, code):
-    # Временно выводим код в логи вместо отправки письма
-    print(f"VERIFICATION CODE for {to_email}: {code}")
-    return
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        return
+    msg = MIMEText(f"Ваш код верификации: {code}\n\nЭто демо-проект портфолио. Пожалуйста, не создавайте лишние аккаунты.")
+    msg["Subject"] = "AI SaaS — Код верификации"
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = to_email
+    try:
+        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT)
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
+        server.quit()
+    except:
+        pass
 
 # --- Маршруты ---
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "ai": "Groq", "db": "Neon", "smtp": "Rambler"})
+    return jsonify({"status": "ok", "ai": "Groq", "db": "Neon"})
 
 @app.route("/register", methods=["POST", "OPTIONS"])
 def register():
@@ -132,14 +167,27 @@ def register():
         return jsonify({"error": "Email и пароль обязательны"}), 400
     if len(password) < 3:
         return jsonify({"error": "Пароль минимум 3 символа"}), 400
+
     existing = get_user_by_email(email)
     if existing:
         return jsonify({"error": "Пользователь с таким email уже существует"}), 400
+
+    pending = get_pending_user(email)
+    if pending:
+        # Уже есть неверифицированный — генерируем новый код
+        code = ''.join(random.choices(string.digits, k=6))
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE pending_users SET verification_code = %s WHERE email = %s", (code, email))
+        conn.commit()
+        conn.close()
+        send_verification_email(email, code)
+        return jsonify({"success": True, "message": f"Новый код отправлен. Ваш код: {code}"})
+
     code = ''.join(random.choices(string.digits, k=6))
-    create_user(email, password, code)
-    # Временно не отправляем письмо
-    # send_verification_email(email, code)
-    return jsonify({"success": True, "message": f"Код отправлен на почту. Ваш код: {code}"})
+    create_pending_user(email, password, code)
+    send_verification_email(email, code)
+    return jsonify({"success": True, "message": f"Код отправлен. Ваш код: {code}"})
 
 @app.route("/verify", methods=["POST", "OPTIONS"])
 def verify():
@@ -150,8 +198,9 @@ def verify():
     code = data.get("code", "").strip()
     if not email or not code:
         return jsonify({"error": "Email и код обязательны"}), 400
-    if verify_user(email, code):
-        return jsonify({"success": True})
+    user_id = verify_and_create_user(email, code)
+    if user_id:
+        return jsonify({"success": True, "user_id": user_id})
     return jsonify({"error": "Неверный код"}), 400
 
 @app.route("/login", methods=["POST", "OPTIONS"])
@@ -166,8 +215,6 @@ def login():
     user = get_user_by_email(email)
     if not user or user[2] != password:
         return jsonify({"error": "Неверный email или пароль"}), 401
-    if not user[3]:
-        return jsonify({"error": "Почта не подтверждена. Проверьте почту и введите код."}), 403
     return jsonify({"success": True, "user_id": user[0], "email": user[1]})
 
 @app.route("/stats", methods=["GET"])
@@ -175,30 +222,16 @@ def stats():
     user_id = request.args.get("user_id")
     if not user_id:
         return jsonify({"error": "user_id обязателен"}), 400
-
     conn = get_conn()
     cur = conn.cursor()
-
-    # Количество отправленных сообщений
     cur.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s AND role = 'user'", (user_id,))
     sent = cur.fetchone()[0]
-
-    # Количество полученных ответов
     cur.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s AND role = 'ai'", (user_id,))
     received = cur.fetchone()[0]
-
-    # Дней активности (сколько разных дней пользователь писал)
     cur.execute("SELECT COUNT(DISTINCT created_at::date) FROM messages WHERE user_id = %s", (user_id,))
     days = cur.fetchone()[0]
-
     conn.close()
-
-    return jsonify({
-        "sent": sent,
-        "received": received,
-        "days": days,
-        "tokens": 0  # Пока заглушка, токены не считаем
-    })
+    return jsonify({"sent": sent, "received": received, "days": days, "tokens": 0})
 
 @app.route("/history", methods=["GET"])
 def history():
