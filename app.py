@@ -7,7 +7,7 @@ from datetime import datetime
 import requests
 import psycopg2
 
-from resend 
+import resend 
 
 # ================= APP =================
 
