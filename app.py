@@ -259,6 +259,51 @@ def history():
     ])
 
 
+# ================= STATS =================
+
+@app.route("/stats", methods=["GET"])
+def stats():
+    user_id = request.args.get("user_id")
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # сколько сообщений пользователя
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM messages
+        WHERE user_id=%s AND role='user'
+    """, (user_id,))
+    sent = cur.fetchone()[0]
+
+    # сколько ответов AI
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM messages
+        WHERE user_id=%s AND role='ai'
+    """, (user_id,))
+    received = cur.fetchone()[0]
+
+    # дней активности
+    cur.execute("""
+        SELECT COUNT(DISTINCT DATE(created_at))
+        FROM messages
+        WHERE user_id=%s
+    """, (user_id,))
+    days = cur.fetchone()[0]
+
+    # фейковые токены пока
+    tokens = (sent + received) * 120
+
+    conn.close()
+
+    return jsonify({
+        "sent": sent,
+        "received": received,
+        "days": days,
+        "tokens": tokens
+    })
+
 @app.route("/")
 def root():
     return "OK", 200
