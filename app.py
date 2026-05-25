@@ -198,6 +198,16 @@ def chat():
     return jsonify({"reply": ai})
 
 
+@app.route("/")
+def root():
+    return "OK", 200
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 # ================= START =================
 
 if __name__ == "__main__":
